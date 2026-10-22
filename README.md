@@ -1,4 +1,4 @@
-# Talk to Your Warehouse
+# Talk to Your Data Warehouse
 
 Ask a data warehouse questions in plain English, and get answers that use your company's official metric definitions, with an eval suite that proves how often the answers are right.
 
