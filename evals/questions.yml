@@ -1,0 +1,355 @@
+# Evaluation set for "talk to your warehouse".
+#
+# gold_sql        Hand-written SQL that defines the correct answer. It is written
+#                 independently of the semantic layer, so the "oracle" eval mode
+#                 also tests the compiler.
+# semantic_query  The semantic query a correct agent should issue. Used by the
+#                 oracle mode to prove the layer can express every question.
+# ordered         Row order matters (time series, rankings).
+# top_n           Ranking question: the first N predicted rows must match gold.
+# tags            Used to break down accuracy in the report.
+#
+# Business rule baked into the gold answers: revenue, profit, units, orders and
+# customers count COMPLETED orders only, which is the company's definition.
+
+questions:
+  - id: q01
+    question: What was our total revenue in 2025?
+    tags: [simple, business_rule]
+    gold_sql: |
+      SELECT SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+    semantic_query:
+      metrics: [revenue]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+
+  - id: q02
+    question: How many completed orders were placed in 2024?
+    tags: [simple]
+    gold_sql: |
+      SELECT COUNT(*) FROM orders
+      WHERE status = 'completed' AND order_date BETWEEN DATE '2024-01-01' AND DATE '2024-12-31'
+    semantic_query:
+      metrics: [order_count]
+      filters: [{field: order_date, operator: between, value: ["2024-01-01", "2024-12-31"]}]
+
+  - id: q03
+    question: Show 2025 revenue by region, highest first.
+    tags: [breakdown, business_rule]
+    ordered: true
+    gold_sql: |
+      SELECT c.region, SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN customers c ON c.customer_id = o.customer_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1 ORDER BY 2 DESC
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [region]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+      order_by: [{field: revenue, direction: desc}]
+
+  - id: q04
+    question: What was revenue each month in 2025?
+    tags: [time_series, business_rule]
+    ordered: true
+    gold_sql: |
+      SELECT date_trunc('month', o.order_date) AS month,
+             SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1 ORDER BY 1
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [order_date__month]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+
+  - id: q05
+    question: What are our top 5 products by revenue of all time?
+    tags: [ranking, business_rule]
+    ordered: true
+    top_n: true
+    gold_sql: |
+      SELECT p.product_name, SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      WHERE o.status = 'completed'
+      GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [product]
+      order_by: [{field: revenue, direction: desc}]
+      limit: 5
+
+  - id: q06
+    question: What is the gross margin for each product category?
+    tags: [derived, breakdown]
+    gold_sql: |
+      SELECT p.category,
+             SUM(oi.quantity * (oi.unit_price * (1 - oi.discount) - p.unit_cost))
+               / SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS gross_margin
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      WHERE o.status = 'completed'
+      GROUP BY 1
+    semantic_query:
+      metrics: [gross_margin]
+      dimensions: [category]
+
+  - id: q07
+    question: What was the average order value by sales channel in 2025?
+    tags: [derived, breakdown]
+    gold_sql: |
+      SELECT o.channel,
+             SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) / COUNT(DISTINCT o.order_id) AS aov
+      FROM order_items oi JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1
+    semantic_query:
+      metrics: [average_order_value]
+      dimensions: [channel]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+
+  - id: q08
+    question: What is the return rate by product category?
+    tags: [derived, breakdown, business_rule]
+    gold_sql: |
+      SELECT p.category,
+             COUNT(DISTINCT CASE WHEN o.status = 'returned' THEN o.order_id END)
+               / COUNT(DISTINCT CASE WHEN o.status IN ('completed', 'returned') THEN o.order_id END) AS return_rate
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      GROUP BY 1
+    semantic_query:
+      metrics: [return_rate]
+      dimensions: [category]
+
+  - id: q09
+    question: How many active customers did we have in each quarter of 2025?
+    tags: [time_series]
+    ordered: true
+    gold_sql: |
+      SELECT date_trunc('quarter', order_date) AS quarter, COUNT(DISTINCT customer_id) AS customers
+      FROM orders
+      WHERE status = 'completed' AND order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1 ORDER BY 1
+    semantic_query:
+      metrics: [active_customers]
+      dimensions: [order_date__quarter]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+
+  - id: q10
+    question: Which customer segment generated the most gross profit in Q4 2024?
+    tags: [ranking]
+    ordered: true
+    top_n: true
+    gold_sql: |
+      SELECT c.segment, SUM(oi.quantity * (oi.unit_price * (1 - oi.discount) - p.unit_cost)) AS gross_profit
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      JOIN customers c ON c.customer_id = o.customer_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2024-10-01' AND DATE '2024-12-31'
+      GROUP BY 1 ORDER BY 2 DESC LIMIT 1
+    semantic_query:
+      metrics: [gross_profit]
+      dimensions: [segment]
+      filters: [{field: order_date, operator: between, value: ["2024-10-01", "2024-12-31"]}]
+      order_by: [{field: gross_profit, direction: desc}]
+      limit: 1
+
+  - id: q11
+    question: How many units of Running Shoes did we sell in 2025?
+    tags: [filter]
+    gold_sql: |
+      SELECT SUM(oi.quantity)
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      WHERE o.status = 'completed' AND p.product_name = 'Running Shoes'
+        AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+    semantic_query:
+      metrics: [units_sold]
+      filters:
+        - {field: product, operator: "=", value: Running Shoes}
+        - {field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}
+
+  - id: q12
+    question: How many orders were cancelled in 2025?
+    tags: [simple]
+    gold_sql: |
+      SELECT COUNT(*) FROM orders
+      WHERE status = 'cancelled' AND order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+    semantic_query:
+      metrics: [cancelled_orders]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+
+  - id: q13
+    question: How much revenue came from Enterprise customers in the West region in 2025?
+    tags: [filter, business_rule]
+    gold_sql: |
+      SELECT SUM(oi.quantity * oi.unit_price * (1 - oi.discount))
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN customers c ON c.customer_id = o.customer_id
+      WHERE o.status = 'completed' AND c.segment = 'Enterprise' AND c.region = 'West'
+        AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+    semantic_query:
+      metrics: [revenue]
+      filters:
+        - {field: segment, operator: "=", value: Enterprise}
+        - {field: region, operator: "=", value: West}
+        - {field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}
+
+  - id: q14
+    question: Which product categories had more than $500,000 in revenue in 2025?
+    tags: [having, business_rule]
+    gold_sql: |
+      SELECT p.category, SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1
+      HAVING SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) > 500000
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [category]
+      filters:
+        - {field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}
+        - {field: revenue, operator: ">", value: 500000}
+
+  - id: q15
+    question: What was weekly revenue in December 2025?
+    tags: [time_series, business_rule]
+    ordered: true
+    gold_sql: |
+      SELECT date_trunc('week', o.order_date) AS week,
+             SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'
+      GROUP BY 1 ORDER BY 1
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [order_date__week]
+      filters: [{field: order_date, operator: between, value: ["2025-12-01", "2025-12-31"]}]
+
+  - id: q16
+    question: What was revenue per customer for each segment in 2025?
+    tags: [derived, breakdown]
+    gold_sql: |
+      SELECT c.segment,
+             SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) / COUNT(DISTINCT o.customer_id) AS rev_per_customer
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN customers c ON c.customer_id = o.customer_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1
+    semantic_query:
+      metrics: [revenue_per_customer]
+      dimensions: [segment]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+
+  - id: q17
+    question: Compare mobile and web revenue in Q4 2025.
+    tags: [filter, breakdown, business_rule]
+    gold_sql: |
+      SELECT o.channel, SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status = 'completed' AND o.channel IN ('mobile', 'web')
+        AND o.order_date BETWEEN DATE '2025-10-01' AND DATE '2025-12-31'
+      GROUP BY 1
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [channel]
+      filters:
+        - {field: channel, operator: in, value: [mobile, web]}
+        - {field: order_date, operator: between, value: ["2025-10-01", "2025-12-31"]}
+
+  - id: q18
+    question: Show revenue and gross margin by year.
+    tags: [time_series, derived]
+    ordered: true
+    gold_sql: |
+      SELECT date_trunc('year', o.order_date) AS year,
+             SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue,
+             SUM(oi.quantity * (oi.unit_price * (1 - oi.discount) - p.unit_cost))
+               / SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS gross_margin
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      WHERE o.status = 'completed'
+      GROUP BY 1 ORDER BY 1
+    semantic_query:
+      metrics: [revenue, gross_margin]
+      dimensions: [order_date__year]
+
+  - id: q19
+    question: How much 2025 revenue came from discounted items versus full-price items?
+    tags: [breakdown, business_rule]
+    gold_sql: |
+      SELECT CASE WHEN oi.discount > 0 THEN 'discounted' ELSE 'full price' END AS pricing,
+             SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [discount_status]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+
+  - id: q20
+    question: Which signup cohort, by quarter of signup, generated the most revenue in 2025?
+    tags: [ranking, cohort]
+    ordered: true
+    top_n: true
+    gold_sql: |
+      SELECT date_trunc('quarter', c.signup_date) AS cohort,
+             SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN customers c ON c.customer_id = o.customer_id
+      WHERE o.status = 'completed' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+      GROUP BY 1 ORDER BY 2 DESC LIMIT 1
+    semantic_query:
+      metrics: [revenue]
+      dimensions: [signup_date__quarter]
+      filters: [{field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}]
+      order_by: [{field: revenue, direction: desc}]
+      limit: 1
+
+  - id: q21
+    question: How many customers who signed up in 2024 placed a completed order in 2025?
+    tags: [cohort, filter]
+    gold_sql: |
+      SELECT COUNT(DISTINCT o.customer_id)
+      FROM orders o JOIN customers c ON c.customer_id = o.customer_id
+      WHERE o.status = 'completed'
+        AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
+        AND c.signup_date BETWEEN DATE '2024-01-01' AND DATE '2024-12-31'
+    semantic_query:
+      metrics: [active_customers]
+      filters:
+        - {field: signup_date, operator: between, value: ["2024-01-01", "2024-12-31"]}
+        - {field: order_date, operator: between, value: ["2025-01-01", "2025-12-31"]}
+
+  - id: q22
+    question: What was the return rate for Electronics in 2024?
+    tags: [derived, filter, business_rule]
+    gold_sql: |
+      SELECT COUNT(DISTINCT CASE WHEN o.status = 'returned' THEN o.order_id END)
+               / COUNT(DISTINCT CASE WHEN o.status IN ('completed', 'returned') THEN o.order_id END)
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN products p ON p.product_id = oi.product_id
+      WHERE p.category = 'Electronics' AND o.order_date BETWEEN DATE '2024-01-01' AND DATE '2024-12-31'
+    semantic_query:
+      metrics: [return_rate]
+      filters:
+        - {field: category, operator: "=", value: Electronics}
+        - {field: order_date, operator: between, value: ["2024-01-01", "2024-12-31"]}

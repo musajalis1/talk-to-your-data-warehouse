@@ -1,0 +1,146 @@
+# Semantic model for the e-commerce warehouse.
+#
+# This file is the single source of truth for business definitions. The agent
+# never writes SQL; it picks metrics and dimensions from here, and the compiler
+# (ttw/semantic.py) turns that selection into SQL. Change a definition here and
+# every question, dashboard and eval picks it up.
+
+name: ecommerce
+description: >
+  Online retailer selling consumer goods in five categories (Electronics, Home,
+  Apparel, Outdoors, Beauty) through web, mobile and marketplace channels.
+
+# All metrics are computed at the grain of this table, which avoids fan-out
+# (double counting) when joining to orders, products and customers.
+fact:
+  table: order_items
+  alias: oi
+
+# Joined only when a requested metric, dimension or filter needs them.
+entities:
+  orders:
+    table: orders
+    alias: o
+    join: o.order_id = oi.order_id
+  products:
+    table: products
+    alias: p
+    join: p.product_id = oi.product_id
+  customers:
+    table: customers
+    alias: c
+    join: c.customer_id = o.customer_id
+    via: orders
+
+dimensions:
+  order_date:
+    type: time
+    expr: o.order_date
+    grains: [day, week, month, quarter, year]
+    description: Date the order was placed. Weeks start on Monday.
+    synonyms: [date, period, time]
+  order_status:
+    expr: o.status
+    description: Order outcome. Note most metrics already filter to completed orders.
+    synonyms: [status]
+  channel:
+    expr: o.channel
+    description: Sales channel the order came through.
+    synonyms: [sales channel, platform]
+  region:
+    expr: c.region
+    description: Customer's US sales region.
+    synonyms: [geography, territory, area]
+  segment:
+    expr: c.segment
+    description: Customer segment.
+    synonyms: [customer segment, customer type, tier]
+  signup_date:
+    type: time
+    expr: c.signup_date
+    grains: [month, quarter, year]
+    description: Date the customer created their account. Use a grain to build signup cohorts.
+    synonyms: [cohort, signup cohort, acquisition date]
+  category:
+    expr: p.category
+    description: Product category.
+    synonyms: [product category, department]
+  product:
+    expr: p.product_name
+    description: Product name.
+    synonyms: [item, sku, product name]
+  discount_status:
+    expr: "CASE WHEN oi.discount > 0 THEN 'discounted' ELSE 'full price' END"
+    description: Whether the line item was sold at a discount.
+    synonyms: [promotion, promo, on sale]
+
+metrics:
+  revenue:
+    description: Net revenue after discounts. Completed orders only (excludes cancelled and returned orders).
+    agg: sum
+    expr: oi.quantity * oi.unit_price * (1 - oi.discount)
+    filter: o.status = 'completed'
+    format: currency
+    synonyms: [sales, net sales, net revenue, income]
+  gross_profit:
+    description: Revenue minus product cost. Completed orders only.
+    agg: sum
+    expr: oi.quantity * (oi.unit_price * (1 - oi.discount) - p.unit_cost)
+    filter: o.status = 'completed'
+    format: currency
+    synonyms: [profit, margin dollars]
+  units_sold:
+    description: Units sold on completed orders.
+    agg: sum
+    expr: oi.quantity
+    filter: o.status = 'completed'
+    synonyms: [quantity, units, volume]
+  order_count:
+    description: Number of completed orders.
+    agg: count_distinct
+    expr: o.order_id
+    filter: o.status = 'completed'
+    synonyms: [orders, number of orders, completed orders]
+  active_customers:
+    description: Distinct customers with at least one completed order in the period.
+    agg: count_distinct
+    expr: o.customer_id
+    filter: o.status = 'completed'
+    synonyms: [customers, buyers, purchasers]
+  returned_orders:
+    description: Number of orders that were returned.
+    agg: count_distinct
+    expr: o.order_id
+    filter: o.status = 'returned'
+    synonyms: [returns]
+  cancelled_orders:
+    description: Number of orders that were cancelled before shipping.
+    agg: count_distinct
+    expr: o.order_id
+    filter: o.status = 'cancelled'
+    synonyms: [cancellations]
+  shipped_orders:
+    description: Orders that shipped (completed or returned). Denominator for return rate.
+    agg: count_distinct
+    expr: o.order_id
+    filter: o.status IN ('completed', 'returned')
+  gross_margin:
+    description: Gross profit as a fraction of revenue (0.42 = 42%).
+    derived: "{gross_profit} / NULLIF({revenue}, 0)"
+    format: percent
+    synonyms: [margin, margin percent, gm]
+  average_order_value:
+    description: Revenue per completed order.
+    derived: "{revenue} / NULLIF({order_count}, 0)"
+    format: currency
+    synonyms: [aov, basket size, average basket]
+  return_rate:
+    description: Returned orders as a fraction of shipped orders (0.08 = 8%).
+    derived: "{returned_orders} / NULLIF({shipped_orders}, 0)"
+    format: percent
+    synonyms: [returns rate, return percentage]
+  revenue_per_customer:
+    description: Revenue divided by active customers.
+    derived: "{revenue} / NULLIF({active_customers}, 0)"
+    format: currency
+    synonyms: [arpu, revenue per buyer, spend per customer]
